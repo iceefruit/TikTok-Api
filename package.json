@@ -1,0 +1,1 @@
+{"name":"plexity-tiktok-api","version":"1.0.0","private":true,"scripts":{"test":"node --test test/*.test.js","check":"node --check api/index.js"},"engines":{"node":">=20"}}
