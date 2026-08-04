@@ -8,6 +8,7 @@ const PAGE_HEADERS = {
   "user-agent": "Mozilla/5.0",
 };
 const SHORT_HOSTS = new Set(["vm.tiktok.com", "vt.tiktok.com"]);
+const SHORT_PATH_PATTERN = /^(?:\/t\/[A-Za-z0-9_-]+|\/v\/\d+(?:\.html)?|\/share\/(?:video|item)\/\d+)(?:\/|$)/i;
 class ApiError extends Error {
   constructor(code, message, status = 400, retryable = false) {
     super(message);
@@ -78,7 +79,11 @@ function parseInputUrl(value) {
   }
   if (url.protocol !== "https:" || !isTikTokHost(url.hostname))
     throw new ApiError("INVALID_URL", "Only HTTPS TikTok URLs are accepted.");
-  if (SHORT_HOSTS.has(url.hostname.toLowerCase())) return { short: true, url };
+  const hostname = url.hostname.toLowerCase();
+  if (
+    SHORT_HOSTS.has(hostname) ||
+    (isTikTokHost(hostname) && SHORT_PATH_PATTERN.test(url.pathname))
+  ) return { short: true, url };
   const match = url.pathname.match(
     /^\/@([A-Za-z0-9._-]{2,32})\/(video|photo)\/(\d{10,30})(?:\/|$)/,
   );

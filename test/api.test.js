@@ -24,6 +24,18 @@ test("accepts short links and rejects foreign hosts", () => {
     _test.parseInputUrl("https://vm.tiktok.com/ZM123456/").short,
     true,
   );
+  assert.equal(
+    _test.parseInputUrl("https://www.tiktok.com/t/ZT123abc/").short,
+    true,
+  );
+  assert.equal(
+    _test.parseInputUrl("https://m.tiktok.com/v/7106594312292453675.html").short,
+    true,
+  );
+  assert.equal(
+    _test.parseInputUrl("https://www.tiktok.com/share/video/7106594312292453675").short,
+    true,
+  );
   assert.throws(() =>
     _test.parseInputUrl(
       "https://example.com/@creator/video/7106594312292453675",
