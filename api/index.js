@@ -1,9 +1,415 @@
 "use strict";
-const VERSION = "1.0.0"; class ApiError extends Error { constructor(code, message, status = 400, retryable = false) { super(message); Object.assign(this, { code, status, retryable }); } }
-function json(res, status, body) { res.statusCode = status; res.setHeader("Content-Type", "application/json; charset=utf-8"); res.setHeader("Cache-Control", "no-store"); res.end(JSON.stringify(body)); } function fail(res, e) { const x = e instanceof ApiError ? e : new ApiError("INTERNAL_ERROR", "An unexpected error occurred.", 500, true); json(res, x.status, { ok: false, error: { code: x.code, message: x.message, retryable: x.retryable } }); }
-function username(v) { const x = String(v || "").trim().replace(/^@/, ""); if (!/^[A-Za-z0-9._]{2,24}$/.test(x)) throw new ApiError("INVALID_INPUT", "Provide a valid TikTok username."); return x; } function videoUrl(v) { let u; try { u = new URL(String(v || "")); } catch { throw new ApiError("INVALID_URL", "Provide a valid TikTok video URL."); } if (u.protocol !== "https:" || !(u.hostname === "tiktok.com" || u.hostname.endsWith(".tiktok.com")) || (!/^\/@[^/]+\/video\/\d+/.test(u.pathname) && !["vm.tiktok.com", "vt.tiktok.com"].includes(u.hostname))) throw new ApiError("INVALID_URL", "Provide a valid TikTok video URL."); return u; }
-function route(req) { return new URL(req.url, "https://api.local").pathname.replace(/^\/api\/v1\/?/, "").replace(/\/$/, ""); } function script(html, id) { const m = new RegExp(`<script[^>]+id=["']${id}["'][^>]*>([\\s\\S]*?)<\\/script>`, "i").exec(html); if (!m) return {}; try { return JSON.parse(m[1]); } catch { return {}; } } async function page(url) { const r = await fetch(url, { redirect: "follow", headers: { "User-Agent": "Mozilla/5.0 PlexityTikTokAPI/1.0" }, signal: AbortSignal.timeout(15000) }); if (!r.ok) throw new ApiError("UPSTREAM_UNAVAILABLE", "TikTok did not make this content available.", 502, true); return { response: r, json: script(await r.text(), "__UNIVERSAL_DATA_FOR_REHYDRATION__") }; }
-async function profile(req, res) { const name = username(new URL(req.url, "https://api.local").searchParams.get("username")); const { json: data } = await page(`https://www.tiktok.com/@${name}`); const info = data?.__DEFAULT_SCOPE__?.["webapp.user-detail"]?.userInfo; if (!info) throw new ApiError("UPSTREAM_UNAVAILABLE", "TikTok profile is unavailable.", 502, true); const u = info.user || {}, s = info.stats || {}; json(res, 200, { ok: true, platform: "tiktok", type: "profile", data: { username: u.uniqueId || name, displayName: u.nickname || "", biography: u.signature || "", isVerified: !!u.verified, avatar: u.avatarLarger || u.avatarMedium || null, followers: s.followerCount || 0, following: s.followingCount || 0, likes: s.heartCount || 0, videos: s.videoCount || 0 }, source: { url: `https://www.tiktok.com/@${name}` } }); }
-async function media(req, res) { const input = videoUrl(new URL(req.url, "https://api.local").searchParams.get("url")); const { response, json: data } = await page(input); const item = data?.__DEFAULT_SCOPE__?.["webapp.video-detail"]?.itemInfo?.itemStruct; if (!item?.video) throw new ApiError("NO_MEDIA_FOUND", "No public TikTok video was found.", 404); const play = item.video.playAddr || item.video.downloadAddr; json(res, 200, { ok: true, platform: "tiktok", type: "media", data: { id: item.id || "", description: item.desc || "", author: { username: item.author?.uniqueId || "", displayName: item.author?.nickname || "", avatar: item.author?.avatarLarger || null }, media: { video: { url: play, watermark: play === item.video.downloadAddr, quality: "best" }, audio: { url: item.music?.playUrl || null }, thumbnail: item.video.cover || null }, canonicalUrl: response.url }, warnings: ["no_watermark_not_guaranteed"] }); }
-const openapi = { openapi: "3.0.3", info: { title: "Plexity TikTok API", version: VERSION, description: "Public TikTok profile and video metadata API." }, paths: { "/api/v1/health": { get: { responses: { 200: { description: "Health" } } } }, "/api/v1/profile": { get: { responses: { 200: { description: "Profile" } } } }, "/api/v1/media": { get: { responses: { 200: { description: "Media" } } } } } };
-module.exports = async (req, res) => { res.setHeader("Access-Control-Allow-Origin", "*"); if (req.method === "OPTIONS") return json(res, 204, null); if (req.method !== "GET") return fail(res, new ApiError("METHOD_NOT_ALLOWED", "Use GET.", 405)); try { const path = route(req); if (path === "health") return json(res, 200, { ok: true, service: "plexity-tiktok-api", version: VERSION }); if (!path) return json(res, 200, { ok: true, service: "Plexity TikTok API", docs: "/api/v1/docs", endpoints: ["/api/v1/profile", "/api/v1/media"] }); if (path === "openapi.json") return json(res, 200, openapi); if (path === "docs") { res.setHeader("Content-Type", "text/html; charset=utf-8"); return res.end("<!doctype html><title>Plexity TikTok API</title><h1>Plexity TikTok API</h1><ul><li>GET /api/v1/profile?username=...</li><li>GET /api/v1/media?url=...</li></ul><a href='/api/v1/openapi.json'>OpenAPI</a>"); } if (path === "profile") return await profile(req, res); if (path === "media") return await media(req, res); throw new ApiError("INVALID_INPUT", "Route not found.", 404); } catch (e) { fail(res, e); } }; module.exports._test = { username, videoUrl, route };
+const crypto = require("node:crypto");
+const VERSION = "2.0.0";
+const PAGE_LIMIT = 3000000;
+const PAGE_HEADERS = {
+  accept: "text/html,application/xhtml+xml,*/*;q=0.8",
+  "accept-language": "en-US,en;q=0.9",
+  "user-agent": "Mozilla/5.0",
+};
+const SHORT_HOSTS = new Set(["vm.tiktok.com", "vt.tiktok.com"]);
+class ApiError extends Error {
+  constructor(code, message, status = 400, retryable = false) {
+    super(message);
+    Object.assign(this, { code, status, retryable });
+  }
+}
+function json(res, status, body) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.end(status === 204 ? "" : JSON.stringify(body));
+}
+function fail(res, error, requestId) {
+  const known = error instanceof ApiError;
+  const current = known
+    ? error
+    : new ApiError(
+        "INTERNAL_ERROR",
+        "An unexpected error occurred.",
+        500,
+        true,
+      );
+  if (!known) console.error("[" + requestId + "]", error);
+  json(res, current.status, {
+    ok: false,
+    requestId,
+    error: {
+      code: current.code,
+      message: current.message,
+      retryable: current.retryable,
+    },
+  });
+}
+function safeEqual(left, right) {
+  const a = Buffer.from(String(left || ""));
+  const b = Buffer.from(String(right || ""));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function authorize(req) {
+  const expected = process.env.API_KEY;
+  if (!expected) {
+    if (process.env.VERCEL || process.env.NODE_ENV === "production")
+      throw new ApiError(
+        "SERVER_MISCONFIGURED",
+        "API authentication is not configured.",
+        503,
+        true,
+      );
+    return;
+  }
+  const bearer = /^Bearer\s+(.+)$/i.exec(
+    String(req.headers.authorization || ""),
+  )?.[1];
+  if (!safeEqual(bearer || req.headers["x-api-key"], expected))
+    throw new ApiError("UNAUTHORIZED", "Provide a valid API key.", 401);
+}
+function isTikTokHost(hostname) {
+  const host = String(hostname || "").toLowerCase();
+  return host === "tiktok.com" || host.endsWith(".tiktok.com");
+}
+function parseInputUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value || "").trim());
+  } catch {
+    throw new ApiError("INVALID_URL", "Provide a valid TikTok media URL.");
+  }
+  if (url.protocol !== "https:" || !isTikTokHost(url.hostname))
+    throw new ApiError("INVALID_URL", "Only HTTPS TikTok URLs are accepted.");
+  if (SHORT_HOSTS.has(url.hostname.toLowerCase())) return { short: true, url };
+  const match = url.pathname.match(
+    /^\/@([A-Za-z0-9._-]{2,32})\/(video|photo)\/(\d{10,30})(?:\/|$)/,
+  );
+  if (!match)
+    throw new ApiError(
+      "INVALID_URL",
+      "The URL must identify a TikTok video or photo post.",
+    );
+  return {
+    short: false,
+    url,
+    username: match[1],
+    kind: match[2],
+    id: match[3],
+    canonicalUrl:
+      "https://www.tiktok.com/@" + match[1] + "/" + match[2] + "/" + match[3],
+  };
+}
+async function resolveInput(value) {
+  let parsed = parseInputUrl(value);
+  if (!parsed.short) return parsed;
+  let current = parsed.url;
+  for (let count = 0; count < 5; count += 1) {
+    const response = await fetch(current, {
+      method: "HEAD",
+      headers: PAGE_HEADERS,
+      redirect: "manual",
+      signal: AbortSignal.timeout(10000),
+    });
+    if (response.status < 300 || response.status >= 400) {
+      parsed = parseInputUrl(response.url || current.href);
+      if (parsed.short)
+        throw new ApiError(
+          "SHORT_LINK_FAILED",
+          "TikTok did not resolve this short link.",
+          502,
+          true,
+        );
+      return parsed;
+    }
+    const location = response.headers.get("location");
+    if (!location) break;
+    current = new URL(location, current);
+    if (!isTikTokHost(current.hostname))
+      throw new ApiError(
+        "UNSAFE_REDIRECT",
+        "TikTok redirected to an unexpected host.",
+        502,
+      );
+    parsed = parseInputUrl(current.href);
+    if (!parsed.short) return parsed;
+  }
+  throw new ApiError(
+    "SHORT_LINK_FAILED",
+    "TikTok short-link resolution exceeded the redirect limit.",
+    502,
+    true,
+  );
+}
+function scriptJson(html, id) {
+  const escaped = id.replace(/[.*+?^{}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(
+    "<script[^>]+id=[\"']" + escaped + "[\"'][^>]*>([\\s\\S]*?)<\\/script>",
+    "i",
+  ).exec(html);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return null;
+  }
+}
+async function fetchPage(url) {
+  const response = await fetch(url, {
+    headers: PAGE_HEADERS,
+    redirect: "follow",
+    signal: AbortSignal.timeout(18000),
+  });
+  if ([401, 403, 429].includes(response.status))
+    throw new ApiError(
+      "UPSTREAM_BLOCKED",
+      "TikTok blocked or rate-limited this request.",
+      502,
+      true,
+    );
+  if (response.status === 404)
+    throw new ApiError(
+      "MEDIA_NOT_FOUND",
+      "The TikTok media was not found or is private.",
+      404,
+    );
+  if (!response.ok)
+    throw new ApiError(
+      "UPSTREAM_UNAVAILABLE",
+      "TikTok returned HTTP " + response.status + ".",
+      502,
+      true,
+    );
+  const html = await response.text();
+  if (Buffer.byteLength(html) > PAGE_LIMIT)
+    throw new ApiError(
+      "UPSTREAM_INVALID",
+      "TikTok returned an unexpectedly large page.",
+      502,
+      true,
+    );
+  return html;
+}
+function isCdnUrl(value) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    return (
+      url.protocol === "https:" &&
+      (host.endsWith(".tiktok.com") ||
+        host.endsWith(".tiktokcdn.com") ||
+        host.endsWith(".tiktokcdn-us.com") ||
+        host.endsWith(".byteoversea.com") ||
+        host.endsWith(".ibytedtos.com") ||
+        host.endsWith(".muscdn.com"))
+    );
+  } catch {
+    return false;
+  }
+}
+function firstCdn(values) {
+  for (const value of values.flat(Infinity)) if (isCdnUrl(value)) return value;
+  return null;
+}
+function extractItem(html) {
+  const universal = scriptJson(html, "__UNIVERSAL_DATA_FOR_REHYDRATION__");
+  const item =
+    universal?.__DEFAULT_SCOPE__?.["webapp.video-detail"]?.itemInfo?.itemStruct;
+  if (item) return item;
+  const sigi = scriptJson(html, "SIGI_STATE");
+  return Object.values(sigi?.ItemModule || {})[0] || null;
+}
+function videoItems(item) {
+  if (!item.video) return [];
+  const play = firstCdn([
+    item.video.playAddr,
+    item.video.playAddrH264,
+    item.video.bitrateInfo?.map((entry) => entry?.PlayAddr?.UrlList),
+  ]);
+  const download = firstCdn([item.video.downloadAddr]);
+  const selected = play || download;
+  if (!selected) return [];
+  return [
+    {
+      type: "video",
+      downloadUrl: selected,
+      contentType: "video/mp4",
+      filename: "tiktok-" + item.id + ".mp4",
+      size: null,
+      thumbnailUrl: firstCdn([
+        item.video.originCover,
+        item.video.dynamicCover,
+        item.video.cover,
+      ]),
+      watermarkAdded: false,
+      sourceMayContainWatermark: !play && selected === download,
+      temporary: true,
+    },
+  ];
+}
+function photoItems(item) {
+  const images = item.imagePost?.images || item.images || [];
+  const output = [];
+  for (const image of images) {
+    const url = firstCdn([
+      image?.imageURL?.urlList,
+      image?.imageUrl?.urlList,
+      image?.displayImage?.urlList,
+      image?.urlList,
+    ]);
+    if (!url) continue;
+    output.push({
+      type: "image",
+      downloadUrl: url,
+      contentType: "image/jpeg",
+      filename: "tiktok-" + item.id + "-" + (output.length + 1) + ".jpg",
+      size: null,
+      watermarkAdded: false,
+      sourceMayContainWatermark: false,
+      temporary: true,
+    });
+  }
+  return output;
+}
+function normalize(item, source) {
+  const items = photoItems(item);
+  if (!items.length) items.push(...videoItems(item));
+  if (!items.length)
+    throw new ApiError(
+      "NO_MEDIA_FOUND",
+      "TikTok did not expose downloadable public media for this URL.",
+      404,
+      true,
+    );
+  return {
+    id: String(item.id || source.id),
+    kind: items[0].type === "image" ? "photo" : "video",
+    canonicalUrl: source.canonicalUrl,
+    description: item.desc || "",
+    author: {
+      username: item.author?.uniqueId || source.username,
+      displayName: item.author?.nickname || "",
+      avatarUrl: firstCdn([
+        item.author?.avatarLarger,
+        item.author?.avatarMedium,
+        item.author?.avatarThumb,
+      ]),
+    },
+    audio: {
+      title: item.music?.title || "",
+      author: item.music?.authorName || "",
+      downloadUrl: firstCdn([item.music?.playUrl]),
+    },
+    items,
+    downloadHeaders: {
+      Referer: "https://www.tiktok.com/",
+      "User-Agent": PAGE_HEADERS["user-agent"],
+    },
+    warnings: [
+      "download_urls_are_temporary_and_should_be_fetched_immediately",
+      "source_watermark_status_is_best_effort",
+    ],
+  };
+}
+async function resolveMedia(value) {
+  const source = await resolveInput(value);
+  const item = extractItem(await fetchPage(source.canonicalUrl));
+  if (!item)
+    throw new ApiError(
+      "NO_MEDIA_FOUND",
+      "TikTok did not expose public media data for this URL.",
+      404,
+      true,
+    );
+  return normalize(item, source);
+}
+function requestInput(req) {
+  const requestUrl = new URL(req.url, "https://api.local");
+  if (req.method === "GET") return requestUrl.searchParams.get("url");
+  if (req.method !== "POST")
+    throw new ApiError(
+      "METHOD_NOT_ALLOWED",
+      "Use GET or POST for this endpoint.",
+      405,
+    );
+  if (req.body && typeof req.body === "object") return req.body.url;
+  if (typeof req.body === "string") {
+    try {
+      return JSON.parse(req.body).url;
+    } catch {
+      throw new ApiError("INVALID_JSON", "Provide a JSON body containing url.");
+    }
+  }
+  return null;
+}
+function route(req) {
+  return new URL(req.url, "https://api.local").pathname
+    .replace(/^\/api\/v1\/?/, "")
+    .replace(/\/$/, "");
+}
+const openapi = {
+  openapi: "3.1.0",
+  info: { title: "TikTok API", version: VERSION },
+  paths: {
+    "/api/v1/health": {
+      get: { responses: { 200: { description: "Healthy" } } },
+    },
+    "/api/v1/media": {
+      post: {
+        security: [{ bearerAuth: [] }],
+        responses: {
+          200: { description: "Resolved TikTok media" },
+          401: { description: "Invalid API key" },
+        },
+      },
+    },
+  },
+  components: {
+    securitySchemes: { bearerAuth: { type: "http", scheme: "bearer" } },
+  },
+};
+module.exports = async (req, res) => {
+  const requestId = crypto.randomUUID();
+  res.setHeader("X-Request-Id", requestId);
+  res.setHeader("Access-Control-Allow-Origin", process.env.CORS_ORIGIN || "*");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Authorization, Content-Type, X-API-Key",
+  );
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  if (req.method === "OPTIONS") return json(res, 204, null);
+  try {
+    const path = route(req);
+    if (path === "health")
+      return json(res, 200, {
+        ok: true,
+        service: "tiktok-api",
+        version: VERSION,
+      });
+    if (path === "openapi.json") return json(res, 200, openapi);
+    if (!path)
+      return json(res, 200, {
+        ok: true,
+        service: "TikTok API",
+        version: VERSION,
+        docs: "/api/v1/openapi.json",
+      });
+    if (path !== "media")
+      throw new ApiError("NOT_FOUND", "Route not found.", 404);
+    authorize(req);
+    return json(res, 200, {
+      ok: true,
+      requestId,
+      platform: "tiktok",
+      data: await resolveMedia(requestInput(req)),
+    });
+  } catch (error) {
+    return fail(res, error, requestId);
+  }
+};
+module.exports._test = {
+  parseInputUrl,
+  isTikTokHost,
+  isCdnUrl,
+  scriptJson,
+  extractItem,
+  normalize,
+  route,
+};

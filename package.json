@@ -1,1 +1,13 @@
-{"name":"plexity-tiktok-api","version":"1.0.0","private":true,"scripts":{"test":"node --test test/*.test.js","check":"node --check api/index.js"},"engines":{"node":">=20"}}
+{
+  "name": "tiktok-api",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Private Discord-oriented TikTok media resolver for Vercel",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node --check api/index.js && node --check test/api.test.js"
+  },
+  "engines": {
+    "node": "22.x"
+  }
+}
