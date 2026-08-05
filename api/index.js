@@ -1,5 +1,6 @@
 "use strict";
 const crypto = require("node:crypto");
+const { once } = require("node:events");
 const VERSION = "2.0.0";
 const PAGE_LIMIT = 3000000;
 const PAGE_HEADERS = {
@@ -321,6 +322,7 @@ function normalize(item, source) {
       downloadUrl: firstCdn([item.music?.playUrl]),
     },
     items,
+    proxyDownloads: true,
     downloadHeaders: {
       Referer: "https://www.tiktok.com/",
       "User-Agent": PAGE_HEADERS["user-agent"],
@@ -330,6 +332,58 @@ function normalize(item, source) {
       "source_watermark_status_is_best_effort",
     ],
   };
+}
+async function proxyDownload(req, res) {
+  if (req.method !== "POST")
+    throw new ApiError("METHOD_NOT_ALLOWED", "Use POST for this endpoint.", 405);
+  let body = req.body;
+  if (typeof body === "string") {
+    try { body = JSON.parse(body); }
+    catch { throw new ApiError("INVALID_JSON", "Provide a JSON request body."); }
+  }
+  const mediaUrl = body?.url;
+  if (!isCdnUrl(mediaUrl))
+    throw new ApiError("INVALID_MEDIA_URL", "Only approved TikTok media CDN URLs can be proxied.");
+  const maxBytes = Math.max(1, Math.min(50 * 1024 * 1024, Number(body?.maxBytes) || 25 * 1024 * 1024));
+  const upstream = await fetch(mediaUrl, {
+    headers: PAGE_HEADERS,
+    redirect: "follow",
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!upstream.ok || !upstream.body)
+    throw new ApiError("CDN_UNAVAILABLE", "TikTok's media CDN could not be reached.", 502, true);
+  const contentType = upstream.headers.get("content-type")?.split(";")[0] || "application/octet-stream";
+  if (!/^(video|image)\//i.test(contentType)) {
+    await upstream.body.cancel().catch(() => {});
+    throw new ApiError("INVALID_MEDIA", "TikTok's CDN did not return media.", 502, true);
+  }
+  const declaredSize = Number(upstream.headers.get("content-length") || 0);
+  if (declaredSize > maxBytes) {
+    await upstream.body.cancel().catch(() => {});
+    throw new ApiError("FILE_TOO_LARGE", "The media exceeds the proxy size limit.", 413);
+  }
+  res.statusCode = 200;
+  res.setHeader("Content-Type", contentType);
+  res.setHeader("Cache-Control", "private, no-store");
+  if (declaredSize > 0) res.setHeader("Content-Length", String(declaredSize));
+  const reader = upstream.body.getReader();
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        res.destroy(new Error("Proxy size limit exceeded"));
+        return;
+      }
+      if (!res.write(Buffer.from(value))) await once(res, "drain");
+    }
+    res.end();
+  } finally {
+    reader.releaseLock();
+  }
 }
 async function resolveMedia(value) {
   const source = await resolveInput(value);
@@ -383,6 +437,12 @@ const openapi = {
         },
       },
     },
+    "/api/v1/download": {
+      post: {
+        security: [{ bearerAuth: [] }],
+        responses: { 200: { description: "Streams resolved TikTok media" } },
+      },
+    },
   },
   components: {
     securitySchemes: { bearerAuth: { type: "http", scheme: "bearer" } },
@@ -414,9 +474,10 @@ module.exports = async (req, res) => {
         version: VERSION,
         docs: "/api/v1/openapi.json",
       });
-    if (path !== "media")
+    if (path !== "media" && path !== "download")
       throw new ApiError("NOT_FOUND", "Route not found.", 404);
     authorize(req);
+    if (path === "download") return await proxyDownload(req, res);
     return json(res, 200, {
       ok: true,
       requestId,
