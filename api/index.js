@@ -333,6 +333,48 @@ function normalize(item, source) {
     ],
   };
 }
+function alternateItems(data, expectedId) {
+  if (!data || String(data.id || "") !== String(expectedId || "")) return [];
+  if (Array.isArray(data.images) && data.images.length) {
+    return data.images.filter(isCdnUrl).slice(0, 10).map((downloadUrl, index) => ({
+      type: "image",
+      downloadUrl,
+      contentType: "image/jpeg",
+      filename: "tiktok-" + expectedId + "-" + (index + 1) + ".jpg",
+      size: null,
+      watermarkAdded: false,
+      sourceMayContainWatermark: false,
+      temporary: true,
+    }));
+  }
+  const downloadUrl = firstCdn([data.hdplay, data.play]);
+  if (!downloadUrl) return [];
+  return [{
+    type: "video",
+    downloadUrl,
+    contentType: "video/mp4",
+    filename: "tiktok-" + expectedId + ".mp4",
+    size: Number(data.hd_size || data.size || 0) || null,
+    thumbnailUrl: isCdnUrl(data.cover) ? data.cover : null,
+    watermarkAdded: false,
+    sourceMayContainWatermark: false,
+    temporary: true,
+  }];
+}
+async function reachableItems(source) {
+  try {
+    const response = await fetch(
+      "https://www.tikwm.com/api/?url=" + encodeURIComponent(source.canonicalUrl) + "&hd=1",
+      { headers: PAGE_HEADERS, signal: AbortSignal.timeout(12000) },
+    );
+    if (!response.ok) return [];
+    const body = await response.json();
+    if (body?.code !== 0) return [];
+    return alternateItems(body.data, source.id);
+  } catch {
+    return [];
+  }
+}
 async function proxyDownload(req, res) {
   if (req.method !== "POST")
     throw new ApiError("METHOD_NOT_ALLOWED", "Use POST for this endpoint.", 405);
@@ -395,7 +437,13 @@ async function resolveMedia(value) {
       404,
       true,
     );
-  return normalize(item, source);
+  const output = normalize(item, source);
+  const reachable = await reachableItems(source);
+  if (reachable.length) {
+    output.items = reachable;
+    output.warnings.push("alternate_tiktok_cdn_selected_for_host_compatibility");
+  }
+  return output;
 }
 function requestInput(req) {
   const requestUrl = new URL(req.url, "https://api.local");
@@ -495,5 +543,6 @@ module.exports._test = {
   scriptJson,
   extractItem,
   normalize,
+  alternateItems,
   route,
 };

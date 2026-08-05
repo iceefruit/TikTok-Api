@@ -123,3 +123,21 @@ test("normalizes photo slideshows", () => {
   assert.equal(output.kind, "photo");
   assert.equal(output.items.length, 2);
 });
+test("normalizes alternate no-watermark CDN results", () => {
+  const items = _test.alternateItems(
+    {
+      id: "7106594312292453675",
+      play: "https://v19.tiktokcdn-us.com/video/a",
+      size: 1234,
+    },
+    "7106594312292453675",
+  );
+  assert.equal(items.length, 1);
+  assert.equal(items[0].type, "video");
+  assert.equal(items[0].watermarkAdded, false);
+  assert.equal(items[0].size, 1234);
+  assert.deepEqual(
+    _test.alternateItems({ id: "wrong", play: items[0].downloadUrl }, "7106594312292453675"),
+    [],
+  );
+});
