@@ -70,6 +70,22 @@ function isTikTokHost(hostname) {
   const host = String(hostname || "").toLowerCase();
   return host === "tiktok.com" || host.endsWith(".tiktok.com");
 }
+function postPath(pathname) {
+  return String(pathname || "").match(
+    /^\/(?:[a-z]{2}(?:-[A-Z]{2})?\/)?@([A-Za-z0-9._-]{1,32})\/(video|photo)\/(\d{10,30})(?:\/|$)/i,
+  );
+}
+function nestedTikTokUrl(url) {
+  for (const name of ["redirect_url", "redirect", "target", "url"]) {
+    const value = url.searchParams.get(name);
+    if (!value) continue;
+    try {
+      const nested = new URL(value);
+      if (nested.protocol === "https:" && isTikTokHost(nested.hostname)) return nested;
+    } catch {}
+  }
+  return null;
+}
 function parseInputUrl(value) {
   let url;
   try {
@@ -84,9 +100,9 @@ function parseInputUrl(value) {
     SHORT_HOSTS.has(hostname) ||
     (isTikTokHost(hostname) && SHORT_PATH_PATTERN.test(url.pathname))
   ) return { short: true, url };
-  const match = url.pathname.match(
-    /^\/@([A-Za-z0-9._-]{2,32})\/(video|photo)\/(\d{10,30})(?:\/|$)/,
-  );
+  const nested = nestedTikTokUrl(url);
+  if (nested) return parseInputUrl(nested.href);
+  const match = postPath(url.pathname);
   if (!match)
     throw new ApiError(
       "INVALID_URL",
@@ -108,7 +124,7 @@ async function resolveInput(value) {
   let current = parsed.url;
   for (let count = 0; count < 5; count += 1) {
     const response = await fetch(current, {
-      method: "HEAD",
+      method: "GET",
       headers: PAGE_HEADERS,
       redirect: "manual",
       signal: AbortSignal.timeout(10000),
@@ -133,6 +149,8 @@ async function resolveInput(value) {
         "TikTok redirected to an unexpected host.",
         502,
       );
+    const nested = nestedTikTokUrl(current);
+    if (nested) current = nested;
     parsed = parseInputUrl(current.href);
     if (!parsed.short) return parsed;
   }

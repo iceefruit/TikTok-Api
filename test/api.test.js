@@ -18,6 +18,18 @@ test("normalizes video and photo URLs", () => {
     ).kind,
     "photo",
   );
+  assert.equal(
+    _test.parseInputUrl(
+      "https://www.tiktok.com/en/@creator/video/7106594312292453675",
+    ).id,
+    "7106594312292453675",
+  );
+  assert.equal(
+    _test.parseInputUrl(
+      "https://www.tiktok.com/login?redirect_url=https%3A%2F%2Fwww.tiktok.com%2F%40creator%2Fvideo%2F7106594312292453675",
+    ).id,
+    "7106594312292453675",
+  );
 });
 test("accepts short links and rejects foreign hosts", () => {
   assert.equal(
