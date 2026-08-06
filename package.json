@@ -1,8 +1,7 @@
 {
   "name": "tiktok-api",
   "version": "2.0.0",
-  "private": true,
-  "description": "Private Discord-oriented TikTok media resolver for Vercel",
+  "description": "A high-performance TikTok media resolver API for Vercel. Retrieves temporary CDN URLs for videos and photo posts without watermarks.",
   "scripts": {
     "test": "node --test test/*.test.js",
     "check": "node --check api/index.js && node --check test/api.test.js"
