@@ -44,10 +44,9 @@ The response provides a structured payload containing temporary download URLs, f
 
 ## Development
 
-Run local tests and syntax checks with:
+Run a local syntax check with:
 
 ```bash
-npm test
 npm run check
 ```
 

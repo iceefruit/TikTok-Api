@@ -293,8 +293,10 @@ function photoItems(item) {
   return output;
 }
 function normalize(item, source) {
-  const items = photoItems(item);
-  if (!items.length) items.push(...videoItems(item));
+  // Some video payloads include image/cover metadata that looks like a
+  // slideshow. The parsed URL kind is authoritative when available.
+  const items = source.kind === "photo" ? photoItems(item) : videoItems(item);
+  if (!items.length) items.push(...source.kind === "photo" ? videoItems(item) : photoItems(item));
   if (!items.length)
     throw new ApiError(
       "NO_MEDIA_FOUND",
@@ -333,9 +335,9 @@ function normalize(item, source) {
     ],
   };
 }
-function alternateItems(data, expectedId) {
+function alternateItems(data, expectedId, expectedKind) {
   if (!data || String(data.id || "") !== String(expectedId || "")) return [];
-  if (Array.isArray(data.images) && data.images.length) {
+  if (expectedKind !== "video" && Array.isArray(data.images) && data.images.length) {
     return data.images.filter(isCdnUrl).slice(0, 10).map((downloadUrl, index) => ({
       type: "image",
       downloadUrl,
@@ -370,7 +372,7 @@ async function reachableItems(source) {
     if (!response.ok) return [];
     const body = await response.json();
     if (body?.code !== 0) return [];
-    return alternateItems(body.data, source.id);
+    return alternateItems(body.data, source.id, source.kind);
   } catch {
     return [];
   }
